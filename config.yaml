@@ -1,0 +1,29 @@
+# ------------------------------------------------------------------
+# Keyword Agent: turns seed ideas into a keyword-to-article plan.
+# Free: Google autocomplete + Google Trends + Groq. No paid SEO tool.
+# ------------------------------------------------------------------
+niche: "under-door draft stoppers"
+seeds:                       # 1-3 short phrases; the agent expands each one
+  - door draft stopper
+
+# Months (1-12) when demand peaks. Used when Google Trends is unavailable
+# (it often is from cloud IPs). Then it is labelled "user_declared", never "verified".
+declared_peak_months: [10, 11, 12, 1, 2]
+
+limits:
+  max_keywords: 90           # keywords kept after cleaning (the model clusters these)
+  max_clusters: 12
+  expand_depth: 2            # 1 = seed + modifiers + A-Z, 2 = also expand the best finds again
+  depth2_seeds: 12           # how many finds get the second expansion
+  trends_clusters: 6         # primaries checked on Google Trends (only if Trends works at all)
+
+llm:
+  model: "openai/gpt-oss-120b"
+  max_tokens: 5000
+
+# Priority score (higher = publish sooner). Missing components are dropped and the rest re-weighted.
+weights:
+  intent: 0.30     # commercial / transactional beats informational for an affiliate site
+  gap: 0.30        # topics you have not covered
+  breadth: 0.20    # how many distinct searches Google suggests (a weak demand proxy)
+  season: 0.20     # peak month is now or next month

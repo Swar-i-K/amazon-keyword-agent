@@ -35,7 +35,7 @@ BASE = [
 ]
 
 
-def fake_ac(q, timeout=10):
+def fake_ac(q, source="google", stats=None, timeout=10):
     return list(BASE) if "draft" in q else []
 
 
@@ -49,7 +49,7 @@ def with_ac(fn):
 
 
 def rows():
-    return with_ac(lambda: kw.collect_keywords(SEEDS, max_total=90, depth=2, depth2_seeds=3, pause=0))
+    return with_ac(lambda: kw.collect_keywords(SEEDS, max_total=90, depth=2, depth2_seeds=3, pause=0, sources=["google"]))
 
 
 # ------------------------------------------------------------------ keywords
@@ -229,11 +229,14 @@ def fake_llm_factory(bad=False):
     return fake
 
 
-def run_main(fake=None, pages=None, cfg=None, season=None):
+def run_main(fake=None, pages=None, cfg=None, season=None, manual_lines=None, real_autocomplete=False):
     out = Path(tempfile.mkdtemp())
+    if manual_lines is not None:
+        (out / "manual_keywords.txt").write_text("\n".join(manual_lines))
     saved = (llm.chat, kw.autocomplete, kw.seasonality, main.PAUSE, main.ROOT)
     llm.chat = fake or fake_llm_factory()
-    kw.autocomplete = fake_ac
+    if not real_autocomplete:
+        kw.autocomplete = fake_ac
     if season:
         kw.seasonality = season
     main.PAUSE = 0
@@ -241,6 +244,7 @@ def run_main(fake=None, pages=None, cfg=None, season=None):
     try:
         c = cfg or main.load_config()
         c["limits"]["depth2_seeds"] = 3
+        c["limits"]["pause_seconds"] = 0
         s = main.run(c, pages=[] if pages is None else pages, out_base=out, today="2026-10-23")
     finally:
         llm.chat, kw.autocomplete, kw.seasonality, main.PAUSE, main.ROOT = saved
@@ -325,13 +329,116 @@ def test_per_cluster_trends_only_when_trends_works():
 
 def test_too_few_keywords_fails_cleanly():
     out = Path(tempfile.mkdtemp())
-    saved = kw.autocomplete
-    kw.autocomplete = lambda q, timeout=10: []
+    saved, saved_root = kw.autocomplete, main.ROOT
+    kw.autocomplete = lambda q, source="google", stats=None, timeout=10: []
+    main.ROOT = out
     try:
-        s = main.run(main.load_config(), pages=[], out_base=out, today="2026-10-23")
+        c = main.load_config(saved_root / "config.yaml")
+        c["limits"]["pause_seconds"] = 0
+        s = main.run(c, pages=[], out_base=out, today="2026-10-23")
     finally:
-        kw.autocomplete = saved
+        kw.autocomplete, main.ROOT = saved, saved_root
     assert s["status"].startswith("failed")
+
+
+# ------------------------------------------------------------------ search engine failures (the real-world problem)
+class FakeResp:
+    def __init__(self, status=200, body=b"[]"):
+        self.status_code, self.content = status, body
+
+
+def fake_http(behaviour, calls):
+    """behaviour: {host fragment: (status, body bytes)}"""
+    def get(url, params=None, timeout=10, headers=None):
+        calls.append(url)
+        for frag, (status, body) in behaviour.items():
+            if frag in url:
+                return FakeResp(status, body)
+        return FakeResp(404, b"")
+    return get
+
+
+def with_http(behaviour, fn):
+    calls, saved = [], kw.requests.get
+    kw.requests.get = fake_http(behaviour, calls)
+    try:
+        return fn(calls)
+    finally:
+        kw.requests.get = saved
+
+
+def test_parse_every_engine_format():
+    assert kw.parse_suggestions(["q", ["door draft stopper", "x"], []]) == ["door draft stopper", "x"]
+    assert kw.parse_suggestions([{"phrase": "door draft stopper"}]) == ["door draft stopper"]
+    assert kw.parse_suggestions({"suggestions": [{"value": "door draft stopper", "type": "KEYWORD"}]}) == ["door draft stopper"]
+    assert kw.parse_suggestions({}) == [] and kw.parse_suggestions("nonsense") == []
+
+
+def test_blocked_engine_is_reported_and_given_up_quickly():
+    def go(calls):
+        stats = kw.Stats(["google"])
+        for i in range(20):
+            kw.autocomplete(f"door draft stopper {i}", "google", stats)
+        return stats, calls
+    stats, calls = with_http({"google.com": (429, b"Too Many Requests")}, go)
+    st = stats.s["google"]
+    assert st["disabled"] and st["errors"] == kw.BREAKER and st["last_error"] == "HTTP 429"
+    assert len(calls) == kw.BREAKER                                       # it stopped hammering the blocked engine
+    assert "given up" in stats.lines()[0] and "HTTP 429" in stats.lines()[0]
+
+
+def test_html_block_page_is_named_as_such():
+    stats = kw.Stats(["google"])
+    with_http({"google.com": (200, b"<html>unusual traffic</html>")}, lambda c: kw.autocomplete("door draft", "google", stats))
+    assert "not JSON" in stats.s["google"]["last_error"]
+
+
+def test_other_engines_carry_the_run_when_google_is_blocked():
+    bing = json.dumps(["door draft stopper", ["door draft stopper", "door draft stopper for renters", "best door draft stopper",
+                                              "door draft stopper for carpet", "door draft stopper without tools", "door draft stopper vs door sweep"]]).encode()
+    behaviour = {"suggestqueries.google.com": (403, b"blocked"), "api.bing.com": (200, bing),
+                 "duckduckgo.com": (200, b"[]"), "completion.amazon.com": (500, b"")}
+
+    def go(calls):
+        return kw.collect(SEEDS, max_total=90, depth=2, depth2_seeds=3, pause=0, sources=["google", "bing", "duckduckgo", "amazon"])
+    rows_, stats = with_http(behaviour, go)
+    assert len(rows_) >= 5 and {r["source"].split("_")[0] for r in rows_} == {"bing"}
+    assert stats.s["google"]["disabled"] and stats.s["amazon"]["disabled"]
+    assert stats.s["bing"]["with_results"] > 0 and stats.s["duckduckgo"]["empty"] > 0 and not stats.s["duckduckgo"]["disabled"]
+
+
+def test_all_engines_blocked_gives_a_useful_message_and_diagnostics():
+    behaviour = {"google.com": (429, b""), "bing.com": (403, b""), "duckduckgo.com": (403, b""), "amazon.com": (503, b"")}
+    saved = kw.requests.get
+    kw.requests.get = fake_http(behaviour, [])
+    out = Path(tempfile.mkdtemp())
+    saved_root, saved_ac = main.ROOT, kw.autocomplete
+    main.ROOT = out
+    try:
+        c = main.load_config(saved_root / "config.yaml")
+        c["limits"]["pause_seconds"] = 0
+        s = main.run(c, pages=[], out_base=out, today="2026-10-23")
+    finally:
+        kw.requests.get, main.ROOT = saved, saved_root
+    assert s["status"].startswith("failed: only 0 keyword(s) found")
+    detail = " ".join(s["details"])
+    assert "HTTP 429" in detail and "HTTP 403" in detail and "HTTP 503" in detail
+    saved_json = json.loads((out / "run_summary.json").read_text())
+    assert saved_json["diagnostics"]["google"]["last_error"] == "HTTP 429"        # the log artifact says WHY
+
+
+def test_manual_keywords_rescue_a_fully_blocked_run():
+    lines = ["# pasted from the Google search box", "door draft stopper for renters", "best door draft stopper", "door draft stopper for carpet",
+             "door draft stopper without tools", "how to stop a draft under a door", "door draft stopper vs door sweep"]
+    behaviour = {"google.com": (429, b""), "bing.com": (403, b""), "duckduckgo.com": (403, b""), "amazon.com": (503, b"")}
+    saved = kw.requests.get
+    kw.requests.get = fake_http(behaviour, [])
+    try:
+        s, out = run_main(manual_lines=lines, fake=fake_llm_factory(), real_autocomplete=True)
+    finally:
+        kw.requests.get = saved
+    assert s["status"] == "success" and s["keywords"] == 6
+    assert any("manual_keywords.txt" in n for n in s["notes"])
 
 
 def test_keywords_csv_is_readable_by_the_seo_agent():

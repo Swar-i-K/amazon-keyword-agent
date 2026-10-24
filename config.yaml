@@ -2,7 +2,7 @@
 # Keyword Agent: turns seed ideas into a keyword-to-article plan.
 # Free: Google autocomplete + Google Trends + Groq. No paid SEO tool.
 # ------------------------------------------------------------------
-niche: "under-door draft stoppers"
+niche: "Home, Home improvement"
 seeds:                       # 1-3 short phrases; the agent expands each one
   - door draft stopper
 

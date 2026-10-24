@@ -1,0 +1,3 @@
+# OPTIONAL fallback. One keyword per line. Lines starting with # are ignored.
+# If the search engines block the run, type your topic into Google or Amazon's search box,
+# copy the suggestions it shows, paste them here, and run the agent again.

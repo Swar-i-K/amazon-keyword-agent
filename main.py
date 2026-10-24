@@ -51,6 +51,21 @@ def load_config(path: Path = ROOT / "config.yaml") -> dict:
     return cfg
 
 
+def load_manual(path: Path) -> list:
+    """manual_keywords.txt: one keyword per line, # starts a comment. Used when the search engines block the run."""
+    out = []
+    if path.exists():
+        for line in path.read_text(encoding="utf-8-sig").splitlines():
+            line = line.split("#", 1)[0].strip()
+            if line:
+                out.append(line)
+    return out
+
+
+def _save_summary(summary: dict) -> None:
+    (ROOT / "run_summary.json").write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
 def load_pages(path: Path = ROOT / "site_pages.csv") -> list:
     out = []
     if path.exists():
@@ -74,16 +89,33 @@ def run(cfg: dict | None = None, pages: list | None = None, out_base: Path | Non
     seeds = cfg["seeds"]
     if not seeds:
         print("No seeds in config.yaml.")
-        return {"status": "failed: no seeds"}
+        summary = {"status": "failed: no seeds in config.yaml"}
+        _save_summary(summary)
+        return summary
 
-    # 1. keywords
-    rows = kw.collect_keywords(seeds, max_total=lim["max_keywords"], depth=lim["expand_depth"],
-                               depth2_seeds=lim["depth2_seeds"])
+    # 1. keywords (several engines; one blocked engine does not end the run)
+    sources = cfg.get("sources") or kw.DEFAULT_SOURCES
+    manual = load_manual(ROOT / "manual_keywords.txt")
+    rows, stats = kw.collect(seeds, max_total=lim["max_keywords"], depth=lim["expand_depth"],
+                             depth2_seeds=lim["depth2_seeds"], pause=lim.get("pause_seconds", 0.25),
+                             sources=sources, manual=manual)
+    diag = stats.lines()
+    for line in diag:
+        print("  " + line)
     if len(rows) < 5:
-        msg = (f"failed: only {len(rows)} keyword(s) found. Google autocomplete may be blocking this IP, "
-               "or the seed is too narrow. Try broader seeds.")
+        msg = (f"failed: only {len(rows)} keyword(s) found. What happened, per search engine:\n  " + "\n  ".join(diag) +
+               "\nFixes: (1) run it again later, GitHub's servers are sometimes rate-limited by search engines; "
+               "(2) type the searches you want into the box of Google/Amazon yourself and paste the suggestions into "
+               "manual_keywords.txt (one per line), then run again; (3) make the seed broader (2-4 common words).")
         print(msg)
-        return {"status": msg}
+        summary = {"status": msg.split("\n")[0], "diagnostics": stats.to_dict(), "details": diag}
+        _save_summary(summary)
+        return summary
+    bad = [l for l in diag if "given up" in l or ("0 returned suggestions" in l and "errors" in l and not l.endswith("0 errors"))]
+    if bad:
+        notes.append("Some search engines did not answer, so keyword ideas may be fewer than usual: " + " | ".join(bad))
+    if manual:
+        notes.append(f"{len(manual)} keyword(s) came from your manual_keywords.txt.")
 
     # 2. clusters
     cluster_source = "Groq (validated)"
@@ -131,8 +163,8 @@ def run(cfg: dict | None = None, pages: list | None = None, out_base: Path | Non
            "overlaps": overlaps, "n_pages": len(pages), "cluster_source": cluster_source, "queue": queue, "notes": notes}
     written = exporters.write_all(out_base, ctx)
     summary = {"status": "success", "output": written["dir"], "keywords": len(rows), "clusters": len(plan_rows),
-               "research_queue": len(queue), "clustered_by": cluster_source, "notes": notes}
-    (ROOT / "run_summary.json").write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
+               "research_queue": len(queue), "clustered_by": cluster_source, "notes": notes, "search_engines": diag}
+    _save_summary(summary)
     print(json.dumps({k: summary[k] for k in ("status", "output", "keywords", "clusters", "clustered_by")}, indent=2))
     return summary
 

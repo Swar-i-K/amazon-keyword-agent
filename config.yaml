@@ -32,3 +32,27 @@ weights:
   gap: 0.30        # topics you have not covered
   breadth: 0.20    # how many distinct searches Google suggests (a weak demand proxy)
   season: 0.20     # peak month is now or next month
+
+# ------------------------------------------------------------------
+# Content ideas (ideas.py): ideas only, from products.csv (or the IDEAS_PRODUCTS workflow box)
+# ------------------------------------------------------------------
+ideas:
+  products_file: products.csv
+  platforms: [article, youtube, social, pinterest]   # article = WordPress, social = Facebook/Instagram
+  per_platform: 8
+  max_products: 6            # per category
+  max_categories: 3          # products are grouped by the `category` column; one folder of ideas per category
+  hands_on_testing: false    # false = ideas never claim you tested the product
+  max_tokens: 4000
+  providers: [gemini, groq]  # tried in order; a provider with no API key is skipped
+  research: true             # Perplexity web-research step (what shoppers ask). Runs only if PERPLEXITY_API_KEY is set. PAID per request
+  research_effort: fast
+
+# Gemini model names are tried in order (a retired name gives 404 and the next one is used). Check Google AI Studio for current names.
+gemini:
+  models: [gemini-3.5-flash, gemini-2.5-flash, gemini-2.5-flash-lite]
+
+# ------------------------------------------------------------------
+# Output tables: xlsx = one Excel workbook (default), csv = separate CSV files, both = write both
+# ------------------------------------------------------------------
+output_format: xlsx

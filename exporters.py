@@ -4,17 +4,20 @@ exporters.py
 Writes under output/<niche-slug>/:
 
   keyword_plan.md     the readable plan (publish order, clusters, gaps, cannibalization, FAQ ideas)
-  keywords.csv        every keyword with its cluster + role. The SEO agent reads it (`keyword` column)
-  clusters.csv        one row per cluster
-  content_plan.csv    one row per planned article, in publish order
-  research_queue.csv  gap topics for the research agent / article agent
+  keyword_plan.xlsx   one Excel workbook with four sheets (output_format: xlsx, the default):
+                        Keywords        every keyword with its cluster + role (the SEO agent reads the `keyword` column)
+                        Clusters        one row per cluster
+                        Content Plan    one row per planned article, in publish order
+                        Research Queue  gap topics for the research agent / article agent
+                      output_format: csv writes keywords.csv, clusters.csv, content_plan.csv, research_queue.csv instead; both writes all
 """
 from __future__ import annotations
 
-import csv
 import json
 import re
 from pathlib import Path
+
+import tables
 
 QUESTION_START = ("how", "what", "why", "can", "does", "is", "should", "which", "are", "do")
 
@@ -32,6 +35,11 @@ def _season_text(season: dict) -> str:
 def question_keywords(rows: list, limit: int = 15) -> list:
     qs = [r["keyword"] for r in rows if r["keyword"].split()[0] in QUESTION_START]
     return qs[:limit]
+
+
+def _where(sheet: str, csv_name: str, cfg: dict) -> str:
+    """How the report points at a table: the Excel sheet, or the csv file when output_format is csv."""
+    return f"`{csv_name}`" if tables.output_format(cfg) == "csv" else f"the **{sheet}** sheet of `keyword_plan.xlsx`"
 
 
 def build_report(ctx: dict) -> str:
@@ -84,9 +92,9 @@ def build_report(ctx: dict) -> str:
         out += ["", "## 5. Question searches (FAQ ideas)", "", *[f"- {q}" for q in qs]]
 
     out += ["", "## 6. Next steps",
-            "1. Take the top row of `research_queue.csv` into the **research agent**: its `search_terms` go in the workflow's search_terms box "
+            f"1. Take the top row of {_where('Research Queue', 'research_queue.csv', ctx['cfg'])} into the **research agent**: its `search_terms` go in the workflow's search_terms box "
             "(and `seed_keywords` in its config.yaml), then run the article agent on the products it finds.",
-            "2. Copy `keywords.csv` into the **SEO agent** repo so it draws secondary keywords from this plan.",
+            f"2. Copy {_where('Keywords', 'keywords.csv', ctx['cfg'])} into the **SEO agent** repo so it draws secondary keywords from this plan.",
             "3. Give each article its cluster's primary keyword as the focus keyword (`focus_keyword` in the SEO agent's `jobs.csv`).",
             "4. Add every published article to `site_pages.csv` with its focus keyword, then rerun to keep the plan current."]
     if ctx.get("notes"):
@@ -104,33 +112,33 @@ def write_all(base: Path, ctx: dict) -> dict:
     for p in plan:
         for k in p["cluster"]["keywords"]:
             member[k] = (p["cluster"]["name"], "primary" if k == p["cluster"]["primary"] else "supporting")
-    with open(out / "keywords.csv", "w", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=["keyword", "intent", "source", "search_volume", "difficulty", "cluster", "role"])
-        w.writeheader()
-        for r in sorted(rows, key=lambda r: (member.get(r["keyword"], ("~", ""))[1] != "primary", r["keyword"])):
-            c, role = member.get(r["keyword"], ("", ""))
-            w.writerow({**r, "cluster": c, "role": role})
+    kw_headers = ["keyword", "intent", "source", "search_volume", "difficulty", "cluster", "role"]
+    kw_rows = []
+    for r in sorted(rows, key=lambda r: (member.get(r["keyword"], ("~", ""))[1] != "primary", r["keyword"])):
+        c, role = member.get(r["keyword"], ("", ""))
+        kw_rows.append([{**r, "cluster": c, "role": role}.get(h, "") for h in kw_headers])
 
-    with open(out / "clusters.csv", "w", newline="", encoding="utf-8") as f:
-        w = csv.writer(f)
-        w.writerow(["cluster", "primary_keyword", "intent", "coverage", "keyword_count", "keywords", "angle"])
-        for p in plan:
-            c = p["cluster"]
-            w.writerow([c["name"], c["primary"], c["intent"], p["coverage"]["status"], len(c["keywords"]),
+    cl_rows = []
+    for p in plan:
+        c = p["cluster"]
+        cl_rows.append([c["name"], c["primary"], c["intent"], p["coverage"]["status"], len(c["keywords"]),
                         " | ".join(c["keywords"]), c.get("angle", "")])
 
-    with open(out / "content_plan.csv", "w", newline="", encoding="utf-8") as f:
-        w = csv.writer(f)
-        w.writerow(["rank", "cluster", "primary_keyword", "intent", "coverage", "covered_by", "priority",
-                    "season_status", "peak_months", "angle", "clustered_by"])
-        for i, p in enumerate(plan, 1):
-            c = p["cluster"]
-            w.writerow([i, c["name"], c["primary"], c["intent"], p["coverage"]["status"], p["coverage"]["url"],
+    cp_rows = []
+    for i, p in enumerate(plan, 1):
+        c = p["cluster"]
+        cp_rows.append([i, c["name"], c["primary"], c["intent"], p["coverage"]["status"], p["coverage"]["url"],
                         "" if p["priority"]["score"] is None else p["priority"]["score"], p["season"].get("status", ""),
                         " ".join(str(m) for m in p["season"].get("peak_months") or []), c.get("angle", ""), c.get("source", "")])
 
-    with open(out / "research_queue.csv", "w", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=["focus_keyword", "suggested_type", "search_terms", "note"])
-        w.writeheader()
-        w.writerows(ctx["queue"])
+    rq_headers = ["focus_keyword", "suggested_type", "search_terms", "note"]
+    rq_rows = [[q.get(h, "") for h in rq_headers] for q in ctx["queue"]]
+
+    tables.write_tables(out, "keyword_plan.xlsx", [
+        ("Keywords", "keywords.csv", kw_headers, kw_rows),
+        ("Clusters", "clusters.csv", ["cluster", "primary_keyword", "intent", "coverage", "keyword_count", "keywords", "angle"], cl_rows),
+        ("Content Plan", "content_plan.csv", ["rank", "cluster", "primary_keyword", "intent", "coverage", "covered_by", "priority",
+                                              "season_status", "peak_months", "angle", "clustered_by"], cp_rows),
+        ("Research Queue", "research_queue.csv", rq_headers, rq_rows),
+    ], cfg)
     return {"dir": str(out), "clusters": len(plan), "queue": len(ctx["queue"])}

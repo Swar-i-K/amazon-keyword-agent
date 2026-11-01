@@ -1,3 +1,4 @@
 output/
 __pycache__/
 *.pyc
+ideas_run_summary.json

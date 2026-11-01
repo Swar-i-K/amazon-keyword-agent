@@ -251,7 +251,19 @@ def run_main(fake=None, pages=None, cfg=None, season=None, manual_lines=None, re
     return s, out
 
 
+SHEETS = {"keywords.csv": "Keywords", "clusters.csv": "Clusters", "content_plan.csv": "Content Plan",
+          "research_queue.csv": "Research Queue"}
+
+
 def _read(path):
+    """Reads one table from keyword_plan.xlsx (the default output). The old csv name picks the sheet."""
+    from openpyxl import load_workbook
+    ws = load_workbook(path.parent / "keyword_plan.xlsx")[SHEETS[path.name]]
+    rows = list(ws.iter_rows(values_only=True))
+    return [dict(zip(rows[0], ["" if v is None else v for v in r])) for r in rows[1:]]
+
+
+def _read_csv(path):
     with open(path, newline="") as f:
         return list(csv.DictReader(f))
 
@@ -262,8 +274,9 @@ def test_end_to_end_with_llm():
     s, out = run_main(pages=pages)
     assert s["status"] == "success" and s["clustered_by"].startswith("Groq")
     base = out / "under-door-draft-stoppers"
-    for f in ("keyword_plan.md", "keywords.csv", "clusters.csv", "content_plan.csv", "research_queue.csv"):
+    for f in ("keyword_plan.md", "keyword_plan.xlsx"):
         assert (base / f).exists(), f
+    assert not list(base.glob("*.csv"))                                           # Excel only: no csv files by default
     plan_rows = _read(base / "content_plan.csv")
     statuses = [r["coverage"] for r in plan_rows]
     assert "covered" in statuses and statuses[-1] == "covered"                 # covered topics sort last
@@ -296,7 +309,48 @@ def test_fallback_without_llm():
     s, out = run_main(fake=no_key)
     assert s["status"] == "success" and s["clustered_by"] == "rule-based fallback"
     assert any("rule-based" in n for n in s["notes"])
-    assert (out / "under-door-draft-stoppers" / "content_plan.csv").exists()
+    assert (out / "under-door-draft-stoppers" / "keyword_plan.xlsx").exists()
+
+
+def test_excel_workbook_layout():
+    from openpyxl import load_workbook
+    s, out = run_main()
+    wb = load_workbook(out / "under-door-draft-stoppers" / "keyword_plan.xlsx")
+    assert wb.sheetnames == ["Keywords", "Clusters", "Content Plan", "Research Queue"]
+    ws = wb["Content Plan"]
+    assert ws.freeze_panes == "A2" and ws.auto_filter.ref and ws["A1"].font.bold and ws["A1"].font.name == "Arial"
+    assert isinstance(ws["A2"].value, int) and ws["A2"].value == 1                # rank stays a number, not text
+    assert ws["A2"].font.name == "Arial"
+    rep = (out / "under-door-draft-stoppers" / "keyword_plan.md").read_text()
+    assert "Research Queue" in rep and "research_queue.csv" not in rep           # the plan points at the sheet, not a missing csv
+
+
+def test_output_format_csv_and_both():
+    cfg = main.load_config()
+    cfg["output_format"] = "csv"
+    s, out = run_main(cfg=cfg)
+    base = out / "under-door-draft-stoppers"
+    assert not (base / "keyword_plan.xlsx").exists()
+    assert {"keywords.csv", "clusters.csv", "content_plan.csv", "research_queue.csv"} <= {f.name for f in base.glob("*.csv")}
+    assert _read_csv(base / "content_plan.csv") and "research_queue.csv" in (base / "keyword_plan.md").read_text()
+    cfg = main.load_config()
+    cfg["output_format"] = "both"
+    s, out = run_main(cfg=cfg)
+    base = out / "under-door-draft-stoppers"
+    assert (base / "keyword_plan.xlsx").exists() and (base / "keywords.csv").exists()
+    cfg = main.load_config()
+    cfg["output_format"] = "nonsense"                                              # unknown value falls back to Excel
+    s, out = run_main(cfg=cfg)
+    assert (out / "under-door-draft-stoppers" / "keyword_plan.xlsx").exists()
+
+
+def test_text_starting_with_equals_stays_text():
+    from openpyxl import load_workbook
+    import tables
+    path = Path(tempfile.mkdtemp()) / "t.xlsx"
+    tables.write_workbook(path, [("S", ["a", "b"], [["=SUM(1,2)", 5], ["x" * 80, 2.5]])])
+    ws = load_workbook(path)["S"]
+    assert ws["A2"].data_type == "s" and ws["A2"].value == "=SUM(1,2)" and ws["B3"].value == 2.5
 
 
 def test_no_pages_means_all_gaps_with_hint():
@@ -446,7 +500,9 @@ def test_keywords_csv_is_readable_by_the_seo_agent():
     if not seo.exists():
         print("  (skipped: SEO agent folder not next to this one)")
         return
-    s, out = run_main()
+    cfg = main.load_config()
+    cfg["output_format"] = "csv"                       # the SEO agent reads keywords.csv; Excel output is not read by it
+    s, out = run_main(cfg=cfg)
     path = out / "under-door-draft-stoppers" / "keywords.csv"
     code = ("import main, sys; from pathlib import Path; "
             "pool = main.load_keyword_pool(Path(sys.argv[1])); print(len(pool), pool[0])")

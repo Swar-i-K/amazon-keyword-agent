@@ -1,0 +1,49 @@
+name: Content Ideas
+
+on:
+  workflow_dispatch:
+    inputs:
+      products:
+        description: "Optional: product names separated by ; (same category). Leave empty to use products.csv"
+        required: false
+        default: ""
+      niche:
+        description: "Optional: category/niche name (overrides config.yaml)"
+        required: false
+        default: ""
+
+jobs:
+  ideas:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      - name: Generate content ideas
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          PERPLEXITY_API_KEY: ${{ secrets.PERPLEXITY_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          IDEAS_PRODUCTS: ${{ github.event.inputs.products }}
+          KEYWORD_NICHE: ${{ github.event.inputs.niche }}
+        run: python ideas.py
+
+      - name: Upload content ideas
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: content-ideas
+          path: |
+            output/
+            ideas_run_summary.json
+          if-no-files-found: ignore
